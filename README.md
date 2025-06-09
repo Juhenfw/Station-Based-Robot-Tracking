@@ -13,7 +13,7 @@ The system detects robots moving through different station checkpoints, verifies
 - **Database Connection Management**: Utilizes MySQL connection pooling for efficient database operations.
 
 ## Technologies Used
-- **YOLOv5**: Used for real-time object detection of robots in video streams.
+- **YOLOv8**: Used for real-time object detection of robots in video streams.
 - **OpenCV**: Used for image processing and video frame display.
 - **MySQL**: Used for data storage and recording robot movements.
 - **Python**: The main programming language for developing the system.
