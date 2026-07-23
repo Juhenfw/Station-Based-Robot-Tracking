@@ -2,38 +2,33 @@
 
 One worker process per camera.
 
-This is designed to be spawned by:
+Designed to be spawned by:
   python -m holabot_station.run_station --config configs/config.yaml
 
-But you can run a single camera directly:
-  python -m holabot_station.camera_worker --config configs/config.yaml --camera cam1
+Single-robot production-like mode:
+- Uses Ultralytics YOLO tracking (model.track(persist=True)) via holabot_station.vision
+- Chooses ONE primary robot per frame (largest box)
+- Applies checkpoint state machine with:
+  - sec_stop (dwell/stop time before ENTER)
+  - pending exit grace
+  - last_entry_area validation
 
-Open-source safety goals:
-- No RTSP/DB credentials are hardcoded; everything comes from config.
-- Default event sink is local (sqlite/jsonl/none).
-- If Ultralytics isn't installed or model isn't found, the worker can still run in "no-detect" mode
-  (shows video + checkpoints) so contributors can validate wiring without private weights.
+Open-source safety:
+- No credentials hardcoded; everything comes from config.yaml
+- Event sinks are local (sqlite/jsonl/none)
+- If ultralytics/model is missing, runs in no-detect mode (still shows video + checkpoints)
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import queue
 import signal
-import sqlite3
-import sys
 import threading
 import time
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
-
-from holabot_station.db import build_sink
-from holabot_station.vision import build_detector_from_config
-from holabot_station.tracker import Detection as TrkDetection
-from holabot_station.tracker import SimpleCentroidTracker, CheckpointEventLogic
+from typing import Any, Dict, List, Optional
 
 try:
     import yaml  # type: ignore
@@ -45,10 +40,10 @@ try:
 except Exception as e:  # pragma: no cover
     raise SystemExit("Missing dependency opencv-python. Install with: pip install opencv-python") from e
 
+from holabot_station.db import build_sink
+from holabot_station.vision import build_detector_from_config
+from holabot_station.tracker import SingleRobotCheckpointSM
 
-# -------------------------
-# Logging (simple, local)
-# -------------------------
 
 def _log(level: str, msg: str, level_cfg: str = "INFO") -> None:
     levels = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40}
@@ -56,10 +51,6 @@ def _log(level: str, msg: str, level_cfg: str = "INFO") -> None:
         ts = time.strftime("%Y-%m-%d %H:%M:%S")
         print(f"[{ts}] {level:<7} {msg}", flush=True)
 
-
-# -------------------------
-# Config loading
-# -------------------------
 
 def _load_cfg(path: Path) -> Dict[str, Any]:
     if not path.exists():
@@ -88,389 +79,22 @@ def _pick_camera_cfg(cfg: Dict[str, Any], name: str) -> Dict[str, Any]:
     raise ValueError(f"Camera '{name}' not found in config. Available: {available}")
 
 
-# -------------------------
-# Event sink (open-source safe)
-# -------------------------
-
-class EventSink:
-    def write_event(self, event: Dict[str, Any]) -> None:
-        raise NotImplementedError
-
-    def close(self) -> None:
-        pass
-
-
-class NoneSink(EventSink):
-    def write_event(self, event: Dict[str, Any]) -> None:
-        return
-
-
-class JsonlSink(EventSink):
-    def __init__(self, path: Path):
-        self.path = path
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._f = self.path.open("a", encoding="utf-8")
-
-    def write_event(self, event: Dict[str, Any]) -> None:
-        self._f.write(json.dumps(event, ensure_ascii=False) + "\n")
-        self._f.flush()
-
-    def close(self) -> None:
-        try:
-            self._f.close()
-        except Exception:
-            pass
-
-
-class SqliteSink(EventSink):
-    def __init__(self, path: Path):
-        self.path = path
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(str(self.path))
-        self.conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS events (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              ts REAL NOT NULL,
-              camera TEXT NOT NULL,
-              track_id INTEGER NOT NULL,
-              station TEXT,
-              event_type TEXT NOT NULL,
-              meta TEXT
-            )
-            """
-        )
-        self.conn.commit()
-
-    def write_event(self, event: Dict[str, Any]) -> None:
-        self.conn.execute(
-            "INSERT INTO events (ts, camera, track_id, station, event_type, meta) VALUES (?, ?, ?, ?, ?, ?)",
-            (
-                float(event.get("ts", time.time())),
-                str(event.get("camera", "")),
-                int(event.get("track_id", -1)),
-                (str(event.get("station")) if event.get("station") is not None else None),
-                str(event.get("type", "")),
-                json.dumps(event.get("meta", {}), ensure_ascii=False),
-            ),
-        )
-        self.conn.commit()
-
-    def close(self) -> None:
-        try:
-            self.conn.close()
-        except Exception:
-            pass
-
-
-def _build_sink(cfg: Dict[str, Any]) -> EventSink:
-    storage = cfg.get("storage", {})
-    if not isinstance(storage, dict):
-        return NoneSink()
-
-    t = str(storage.get("type", "none")).lower()
-    if t == "none":
-        return NoneSink()
-    if t == "jsonl":
-        return JsonlSink(Path(str(storage.get("jsonl_path", "data/events.jsonl"))))
-    if t == "sqlite":
-        return SqliteSink(Path(str(storage.get("sqlite_path", "data/events.sqlite"))))
-
-    return NoneSink()
-
-
-# -------------------------
-# Detection
-# -------------------------
-
-@dataclass
-class Detection:
-    xyxy: Tuple[int, int, int, int]
-    conf: float
-    cls_name: str
-
-
-class Detector:
-    def detect(self, frame_bgr) -> List[Detection]:
-        raise NotImplementedError
-
-
-class NoopDetector(Detector):
-    def detect(self, frame_bgr) -> List[Detection]:
-        return []
-
-
-class UltralyticsYoloDetector(Detector):
-    def __init__(
-        self,
-        model_path: str,
-        device: str,
-        conf: float,
-        iou: float,
-        allow_classes: Optional[List[str]],
-        log_level: str,
-    ):
-        self.log_level = log_level
-        self.allow_classes = [c.lower() for c in (allow_classes or [])]
-        self.conf = float(conf)
-        self.iou = float(iou)
-
-        try:
-            from ultralytics import YOLO  # type: ignore
-        except Exception as e:
-            raise RuntimeError("Ultralytics not installed. pip install ultralytics") from e
-
-        if not Path(model_path).exists():
-            raise FileNotFoundError(
-                f"Model not found at '{model_path}'. Put a model there or set model.path in config."
-            )
-
-        _log("INFO", f"Loading YOLO model: {model_path} (device={device})", self.log_level)
-        self.model = YOLO(model_path)
-        self.device = device
-
-    def detect(self, frame_bgr) -> List[Detection]:
-        # Ultralytics expects BGR images as numpy arrays.
-        results = self.model.predict(
-            source=frame_bgr,
-            conf=self.conf,
-            iou=self.iou,
-            device=self.device,
-            verbose=False,
-        )
-        if not results:
-            return []
-
-        r0 = results[0]
-        names = getattr(r0, "names", {})
-        dets: List[Detection] = []
-
-        boxes = getattr(r0, "boxes", None)
-        if boxes is None:
-            return []
-
-        # Convert to CPU numpy for safety
-        xyxy = boxes.xyxy
-        confs = boxes.conf
-        clss = boxes.cls
-        try:
-            xyxy = xyxy.cpu().numpy()
-            confs = confs.cpu().numpy()
-            clss = clss.cpu().numpy()
-        except Exception:
-            pass
-
-        for (x1, y1, x2, y2), cf, cl in zip(xyxy, confs, clss):
-            cls_id = int(cl)
-            cls_name = str(names.get(cls_id, str(cls_id)))
-            if self.allow_classes and cls_name.lower() not in self.allow_classes:
-                continue
-            dets.append(
-                Detection(
-                    xyxy=(int(x1), int(y1), int(x2), int(y2)),
-                    conf=float(cf),
-                    cls_name=cls_name,
-                )
-            )
-
-        return dets
-
-
-def _build_detector(cfg: Dict[str, Any], log_level: str) -> Detector:
-    model = cfg.get("model", {})
-    if not isinstance(model, dict):
-        _log("WARNING", "Config model section missing/invalid; running with NoopDetector", log_level)
-        return NoopDetector()
-
-    mtype = str(model.get("type", "torch_yolo")).lower()
-    path = str(model.get("path", "model.pt"))
-    device = str(model.get("device", "cpu"))
-    conf = float(model.get("conf_threshold", 0.25))
-    iou = float(model.get("iou_threshold", 0.45))
-    allow = model.get("allow_classes", [])
-    allow_classes = [str(x) for x in allow] if isinstance(allow, list) else []
-
-    if mtype in ("torch_yolo", "ultralytics", "yolo"):
-        try:
-            return UltralyticsYoloDetector(path, device, conf, iou, allow_classes, log_level)
-        except Exception as e:
-            _log("WARNING", f"Detector disabled: {e}. Running in no-detect mode.", log_level)
-            return NoopDetector()
-
-    _log("WARNING", f"Unknown model.type '{mtype}'. Running in no-detect mode.", log_level)
-    return NoopDetector()
-
-
-# -------------------------
-# Tracking + checkpoint logic (simple, deterministic)
-# -------------------------
-
-@dataclass
-class Track:
-    track_id: int
-    bbox: Tuple[int, int, int, int]
-    cls_name: str
-    conf: float
-    last_seen_ts: float
-    station: Optional[str] = None
-
-
-def _centroid(b: Tuple[int, int, int, int]) -> Tuple[float, float]:
-    x1, y1, x2, y2 = b
-    return ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
-
-
-def _in_rect(pt: Tuple[float, float], rect: List[int]) -> bool:
-    x, y = pt
-    x1, y1, x2, y2 = rect
-    return x1 <= x <= x2 and y1 <= y <= y2
-
-
-class SimpleTracker:
-    def __init__(self, max_missed_seconds: float):
-        self.max_missed_seconds = float(max_missed_seconds)
-        self._next_id = 1
-        self._tracks: Dict[int, Track] = {}
-
-    def update(self, dets: List[Detection], ts: float) -> List[Track]:
-        # Very simple assignment by nearest centroid (greedy). Good enough for an open-source template.
-        used = set()
-        det_centroids = [(_centroid(d.xyxy), d) for d in dets]
-
-        # Try to match existing tracks
-        for tid, tr in list(self._tracks.items()):
-            if ts - tr.last_seen_ts > self.max_missed_seconds:
-                del self._tracks[tid]
-                continue
-
-            best_j = None
-            best_dist = 1e18
-            cx, cy = _centroid(tr.bbox)
-            for j, (cpt, d) in enumerate(det_centroids):
-                if j in used:
-                    continue
-                dx = cpt[0] - cx
-                dy = cpt[1] - cy
-                dist = dx * dx + dy * dy
-                if dist < best_dist:
-                    best_dist = dist
-                    best_j = j
-
-            # Threshold prevents random jumps; tuned for 640x480-ish.
-            if best_j is not None and best_dist < (90.0 * 90.0):
-                used.add(best_j)
-                d = det_centroids[best_j][1]
-                self._tracks[tid] = Track(
-                    track_id=tid,
-                    bbox=d.xyxy,
-                    cls_name=d.cls_name,
-                    conf=d.conf,
-                    last_seen_ts=ts,
-                    station=tr.station,
-                )
-
-        # Create new tracks for unmatched detections
-        for j, (_, d) in enumerate(det_centroids):
-            if j in used:
-                continue
-            tid = self._next_id
-            self._next_id += 1
-            self._tracks[tid] = Track(
-                track_id=tid,
-                bbox=d.xyxy,
-                cls_name=d.cls_name,
-                conf=d.conf,
-                last_seen_ts=ts,
-                station=None,
-            )
-
-        return list(self._tracks.values())
-
-
-class CheckpointLogic:
-    def __init__(self, checkpoints: Dict[str, List[int]], min_dwell_seconds: float):
-        self.checkpoints = checkpoints
-        self.min_dwell_seconds = float(min_dwell_seconds)
-        # track_id -> (station, enter_ts)
-        self._inside: Dict[int, Tuple[str, float]] = {}
-
-    def evaluate(self, tracks: List[Track], ts: float) -> List[Dict[str, Any]]:
-        events: List[Dict[str, Any]] = []
-
-        active_ids = {t.track_id for t in tracks}
-        # Handle exits for tracks no longer present
-        for tid, (st, enter_ts) in list(self._inside.items()):
-            if tid not in active_ids:
-                events.append({"ts": ts, "track_id": tid, "station": st, "type": "exit"})
-                del self._inside[tid]
-
-        for t in tracks:
-            c = _centroid(t.bbox)
-            in_station: Optional[str] = None
-            for st_name, rect in self.checkpoints.items():
-                if _in_rect(c, rect):
-                    in_station = st_name
-                    break
-
-            if in_station is None:
-                if t.track_id in self._inside:
-                    st, _ = self._inside[t.track_id]
-                    events.append({"ts": ts, "track_id": t.track_id, "station": st, "type": "exit"})
-                    del self._inside[t.track_id]
-                continue
-
-            if t.track_id not in self._inside:
-                # Enter (tentative)
-                self._inside[t.track_id] = (in_station, ts)
-                continue
-
-            prev_station, enter_ts = self._inside[t.track_id]
-            if prev_station != in_station:
-                # Switch station -> treat as exit + new enter
-                events.append({"ts": ts, "track_id": t.track_id, "station": prev_station, "type": "exit"})
-                self._inside[t.track_id] = (in_station, ts)
-                continue
-
-            # Confirm entry after dwell
-            if ts - enter_ts >= self.min_dwell_seconds:
-                # Emit a single "enter" event when dwell threshold is passed.
-                # To keep it simple, we mark enter_ts as -inf after firing.
-                if enter_ts >= 0:
-                    events.append({"ts": ts, "track_id": t.track_id, "station": in_station, "type": "enter"})
-                    self._inside[t.track_id] = (in_station, -1.0)
-
-        return events
-
-
-# -------------------------
-# Video capture + processing
-# -------------------------
-
-@dataclass
-class FramePacket:
-    ts: float
-    frame: Any
-
-
 def _open_capture(source_cfg: Dict[str, Any], log_level: str) -> cv2.VideoCapture:
     stype = str(source_cfg.get("type", "webcam")).lower()
 
     if stype == "webcam":
         idx = int(source_cfg.get("webcam_index", 0))
-        cap = cv2.VideoCapture(idx)
-        return cap
+        return cv2.VideoCapture(idx)
 
     if stype == "file":
         path = str(source_cfg.get("file_path", ""))
-        cap = cv2.VideoCapture(path)
-        return cap
+        return cv2.VideoCapture(path)
 
     if stype == "rtsp":
         url = str(source_cfg.get("rtsp_url", ""))
         if not url:
             raise ValueError("source.rtsp_url is empty")
-        cap = cv2.VideoCapture(url)
-        return cap
+        return cv2.VideoCapture(url)
 
     _log("WARNING", f"Unknown source.type '{stype}', falling back to webcam(0)", log_level)
     return cv2.VideoCapture(0)
@@ -500,21 +124,28 @@ def _draw_checkpoints(frame, checkpoints: Dict[str, List[int]]):
         )
 
 
-def _draw_tracks(frame, tracks: List[Track]):
-    for t in tracks:
-        x1, y1, x2, y2 = t.bbox
-        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 160, 255), 2)
-        label = f"ID {t.track_id} {t.cls_name} {t.conf:.2f}"
-        cv2.putText(
-            frame,
-            label,
-            (x1, max(15, y1 - 6)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (0, 160, 255),
-            1,
-            cv2.LINE_AA,
-        )
+def _draw_primary(frame, primary) -> None:
+    if primary is None:
+        return
+    x1, y1, x2, y2 = primary.bbox
+    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 160, 255), 2)
+    label = f"ID {primary.track_id} {primary.cls_name} {primary.conf:.2f}"
+    cv2.putText(
+        frame,
+        label,
+        (x1, max(15, y1 - 6)),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.5,
+        (0, 160, 255),
+        1,
+        cv2.LINE_AA,
+    )
+
+
+class FramePacket:
+    def __init__(self, ts: float, frame: Any):
+        self.ts = ts
+        self.frame = frame
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -536,8 +167,12 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     w = int(tracking_cfg.get("process_width", 640))
     h = int(tracking_cfg.get("process_height", 480))
-    max_missed = float(tracking_cfg.get("max_missed_seconds", 2.0))
-    min_dwell = float(tracking_cfg.get("min_dwell_seconds", 0.3))
+
+    # Production-like parameters
+    sec_stop = float(tracking_cfg.get("sec_stop", 3.0))
+    exit_grace_seconds = float(tracking_cfg.get("exit_grace_seconds", 1.0))
+    require_exit_matches = bool(tracking_cfg.get("require_exit_matches_last_entry", True))
+    lock_track_id = bool(tracking_cfg.get("lock_track_id", True))
 
     checkpoints_raw = cam_cfg.get("checkpoints", {})
     if not isinstance(checkpoints_raw, dict):
@@ -549,8 +184,14 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     sink = build_sink(cfg.get("storage", {}))
     detector = build_detector_from_config(cfg)
-    tracker = SimpleCentroidTracker(max_missed_seconds=max_missed)
-    cp_logic = CheckpointEventLogic(checkpoints=checkpoints, min_dwell_seconds=min_dwell)
+
+    sm = SingleRobotCheckpointSM(
+        checkpoints=checkpoints,
+        sec_stop=sec_stop,
+        exit_grace_seconds=exit_grace_seconds,
+        require_exit_matches_last_entry=require_exit_matches,
+        lock_track_id=lock_track_id,
+    )
 
     source_cfg = cam_cfg.get("source", {}) if isinstance(cam_cfg.get("source", {}), dict) else {}
 
@@ -639,34 +280,45 @@ def main(argv: Optional[List[str]] = None) -> int:
             ts = pkt.ts
             frame = pkt.frame
 
-            dets = detector.detect(frame)
-            trk_dets = [TrkDetection(bbox=d.bbox, conf=d.conf, cls_name=d.cls_name) for d in dets]
-            tracks = tracker.update(trk_dets, ts=ts)
-            events = cp_logic.evaluate(tracks, ts=ts)
+            # Production single-robot: choose one primary detection (largest box)
+            primary = None
+            try:
+                primary = detector.detect_primary(frame)  # type: ignore[attr-defined]
+            except Exception:
+                # Detector may not implement detect_primary (noop), that's fine.
+                primary = None
+
+            events = sm.update(
+                ts=ts,
+                track_id=(primary.track_id if primary is not None else None),
+                bbox=(primary.bbox if primary is not None else None),
+            )
 
             for ev in events:
+                status = "In" if ev["type"] == "enter" else "Out"
                 ev_out = {
                     "ts": ev["ts"],
                     "camera": args.camera,
-                    "track_id": ev["track_id"],
+                    "track_id": (primary.track_id if primary and primary.track_id is not None else -1),
                     "station": ev.get("station"),
-                    "type": ev["type"],
+                    # Keep both: machine-friendly and human-friendly
+                    "event_type": ev["type"],
+                    "status": status,
                     "meta": {"source_type": str(source_cfg.get("type", ""))},
                 }
                 sink.write_event(ev_out)
                 _log("INFO", f"[{args.camera}] event: {ev_out}", log_level)
 
-            # Draw
             frames += 1
             now = time.time()
             if now - last_fps_t >= 1.0:
-                fps = frames / (now - last_fps_t)
+                fps = frames / max(now - last_fps_t, 1e-9)
                 frames = 0
                 last_fps_t = now
 
             if draw_checkpoints:
                 _draw_checkpoints(frame, checkpoints)
-            _draw_tracks(frame, tracks)
+            _draw_primary(frame, primary)
 
             cv2.putText(
                 frame,
@@ -681,7 +333,6 @@ def main(argv: Optional[List[str]] = None) -> int:
 
             if display:
                 cv2.imshow(win_name, frame)
-                # Press 'q' to stop this worker
                 if (cv2.waitKey(1) & 0xFF) == ord("q"):
                     stop = True
 
