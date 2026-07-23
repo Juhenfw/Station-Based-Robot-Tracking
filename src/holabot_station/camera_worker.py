@@ -30,6 +30,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from holabot_station.db import build_sink
+from holabot_station.vision import build_detector_from_config
+from holabot_station.tracker import Detection as TrkDetection
+from holabot_station.tracker import SimpleCentroidTracker, CheckpointEventLogic
+
 try:
     import yaml  # type: ignore
 except Exception as e:  # pragma: no cover
@@ -542,10 +547,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         if isinstance(v, list) and len(v) == 4:
             checkpoints[str(k)] = [int(x) for x in v]
 
-    sink = _build_sink(cfg)
-    detector = _build_detector(cfg, log_level)
-    tracker = SimpleTracker(max_missed_seconds=max_missed)
-    cp_logic = CheckpointLogic(checkpoints=checkpoints, min_dwell_seconds=min_dwell)
+    sink = build_sink(cfg.get("storage", {}))
+    detector = build_detector_from_config(cfg)
+    tracker = SimpleCentroidTracker(max_missed_seconds=max_missed)
+    cp_logic = CheckpointEventLogic(checkpoints=checkpoints, min_dwell_seconds=min_dwell)
 
     source_cfg = cam_cfg.get("source", {}) if isinstance(cam_cfg.get("source", {}), dict) else {}
 
@@ -635,7 +640,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             frame = pkt.frame
 
             dets = detector.detect(frame)
-            tracks = tracker.update(dets, ts=ts)
+            trk_dets = [TrkDetection(bbox=d.bbox, conf=d.conf, cls_name=d.cls_name) for d in dets]
+            tracks = tracker.update(trk_dets, ts=ts)
             events = cp_logic.evaluate(tracks, ts=ts)
 
             for ev in events:

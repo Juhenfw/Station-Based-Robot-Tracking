@@ -24,7 +24,7 @@ model:
   path: "model.pt"
 
   # cpu | cuda:0 | cuda (worker will fall back to cpu if cuda isn't available)
-  device: "cpu"
+  device: "cuda"
 
   # Detection settings (tune per use-case)
   conf_threshold: 0.25
@@ -33,6 +33,8 @@ model:
   # Only keep detections with these class names (optional).
   # Leave empty to accept all classes.
   allow_classes: ["robot"]
+  
+  use_track: true
 
 tracking:
   # How long (seconds) a robot can be missing before we consider it gone.
@@ -52,6 +54,12 @@ storage:
   type: "sqlite"
   sqlite_path: "data/events.sqlite"
   jsonl_path: "data/events.jsonl"
+
+  logic: "production_single_robot"
+  sec_stop: 3.0
+  exit_grace_seconds: 1.0
+  require_exit_matches_last_entry: true
+  lock_track_id: true
 
 # List of cameras to run in parallel (one OS process per camera).
 # Each camera worker uses its own source and checkpoint layout.

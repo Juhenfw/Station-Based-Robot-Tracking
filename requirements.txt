@@ -1,0 +1,10 @@
+# Core runtime dependencies
+pyyaml>=6.0
+opencv-python>=4.8
+
+# Optional but recommended: YOLO detection via Ultralytics
+# If you prefer a lighter install for demo/no-detect mode, you can remove this line.
+ultralytics>=8.0
+
+# Common numerical dependency (often installed automatically, but pinned for reliability)
+numpy>=1.23
