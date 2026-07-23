@@ -1,0 +1,114 @@
+# Example configuration for the open-source Station-Based Robot Tracking project.
+
+app:
+  station_name: "demo-station"
+  log_level: "INFO"   # DEBUG, INFO, WARNING, ERROR
+
+runtime:
+  # If true, worker opens an OpenCV window (cv2.imshow). Disable for headless servers.
+  display: true
+  # Draw checkpoint rectangles and labels on the preview/output.
+  draw_checkpoints: true
+  # Maximum frames kept in the queue between capture thread and processing thread.
+  frame_queue_size: 5
+
+model:
+  # Supported (recommended open-source defaults):
+  # - torch_yolo: Ultralytics YOLO .pt
+  # - onnx_yolo: ONNX Runtime (if you add support)
+  type: "torch_yolo"
+
+  # Path to a model file. For open-source, you can:
+  # - ship a small demo model, OR
+  # - instruct users to place their own model in ./models and keep it out of git.
+  path: "model.pt"
+
+  # cpu | cuda:0 | cuda (worker will fall back to cpu if cuda isn't available)
+  device: "cuda"
+
+  # Detection settings (tune per use-case)
+  conf_threshold: 0.25
+  iou_threshold: 0.45
+
+  # Only keep detections with these class names (optional).
+  # Leave empty to accept all classes.
+  allow_classes: ["robot"]
+  
+  use_track: true
+
+tracking:
+  # How long (seconds) a robot can be missing before we consider it gone.
+  max_missed_seconds: 2.0
+
+  # How long (seconds) a robot must remain in an area before counting as an entry.
+  min_dwell_seconds: 0.3
+
+  # If you run at different resolutions, define the processing resolution here.
+  # The worker will resize frames to this before running detection/tracking.
+  process_width: 640
+  process_height: 480
+
+storage:
+  # Where to write events (open-source safe default).
+  # type: none | sqlite | jsonl
+  type: "sqlite"
+  sqlite_path: "data/events.sqlite"
+  jsonl_path: "data/events.jsonl"
+
+  logic: "production_single_robot"
+  sec_stop: 3.0
+  exit_grace_seconds: 1.0
+  require_exit_matches_last_entry: true
+  lock_track_id: true
+
+# List of cameras to run in parallel (one OS process per camera).
+# Each camera worker uses its own source and checkpoint layout.
+
+cameras:
+  - name: "cam1"
+    source:
+      type: "webcam"   # webcam | file | rtsp
+      webcam_index: 0
+      file_path: "samples/cam1.mp4"
+      rtsp_url: "rtsp://USER:PASSWORD@192.168.1.10:554/stream"  # example only
+
+    output:
+      save_video: false
+      out_path: "out/cam1.mp4"
+
+    # Define rectangular checkpoint areas as [x1, y1, x2, y2] in *processed* frame coordinates
+    # (i.e., after resizing to tracking.process_width/height).
+    checkpoints:
+      Station_1: [40, 60, 220, 220]
+      Station_2: [260, 60, 460, 220]
+      Station_3: [480, 60, 620, 220]
+
+  - name: "cam2"
+    source:
+      type: "file"
+      webcam_index: 0
+      file_path: "samples/cam2.mp4"
+      rtsp_url: "rtsp://USER:PASSWORD@192.168.1.11:554/stream"  # example only
+
+    output:
+      save_video: false
+      out_path: "out/cam2.mp4"
+
+    checkpoints:
+      Station_1: [50, 250, 250, 440]
+      Station_2: [280, 250, 480, 440]
+
+  - name: "cam3"
+    source:
+      type: "file"
+      webcam_index: 0
+      file_path: "samples/cam3.mp4"
+      rtsp_url: "rtsp://USER:PASSWORD@192.168.1.12:554/stream"  # example only
+
+    output:
+      save_video: false
+      out_path: "out/cam3.mp4"
+
+    checkpoints:
+      Station_1: [10, 10, 200, 120]
+      Station_2: [210, 10, 400, 120]
