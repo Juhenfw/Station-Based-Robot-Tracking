@@ -1,0 +1,38 @@
+# holabot-station.service.example
+#
+# Copy to: /etc/systemd/system/holabot-station.service
+# Then edit paths/user/group to match your environment.
+#
+# IMPORTANT: Keep your real configs/config.yaml private if it contains RTSP credentials.
+
+[Unit]
+Description=Holabot Station-Based Robot Tracking (orchestrator)
+After=network.target
+
+[Service]
+Type=simple
+
+# --- EDIT THESE ---
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/station-based-robot-tracking
+
+# If you use a venv, point ExecStart to the venv python.
+# Example:
+# ExecStart=/opt/station-based-robot-tracking/.venv/bin/python -m holabot_station.run_station --config configs/config.yaml
+ExecStart=/usr/bin/python3 -m holabot_station.run_station --config configs/config.yaml
+
+# --- Recommended reliability settings ---
+Restart=always
+RestartSec=5
+
+# Optional: environment variables
+# Environment=PYTHONUNBUFFERED=1
+# Environment=PYTHONPATH=/opt/station-based-robot-tracking/src
+
+# Logs go to journalctl by default
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
