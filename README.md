@@ -1,3 +1,7 @@
+[English](README.md) | [Indonesia](README-id.md) | [日本語](README-ja.md) | [简体中文](README-zh.md)
+
+---
+
 # Station-Based Robot Tracking (Open Source Template)
 
 This repository is an **open-source-friendly template** for running **multi-camera robot detection + checkpoint (station) tracking**.
@@ -31,13 +35,16 @@ Everything that can contain sensitive information (RTSP URLs, credentials, inter
 ### 1) Create and activate a virtual environment
 
 PowerShell:
-
+```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
+```
 
 ### 2) Install dependencies
 
+```bash
 pip install -r requirements.txt
+```
 
 Recommended packages for full functionality:
 - `opencv-python`
@@ -47,8 +54,9 @@ Recommended packages for full functionality:
 ### 3) Create your config
 
 Copy the example config:
-
+```powershell
 Copy-Item .\configs\config.example.yaml .\configs\config.yaml
+```
 
 Edit `configs/config.yaml`:
 - set `cameras[].source` to `webcam` or `file` first for testing
@@ -57,22 +65,24 @@ Edit `configs/config.yaml`:
 ### 4) Ensure Python can import from `src/`
 
 If you have not installed this package, add `./src` to `PYTHONPATH`:
-
+```powershell
 $env:PYTHONPATH = "$PWD\src"
-
+```
 (You can add this to your PowerShell profile if you want.)
 
 ### 5) Run (orchestrator spawns camera workers)
 
+```powershell
 python -m holabot_station.run_station --config configs/config.yaml
-
+```
 Stop with **Ctrl+C**.
 
 ## Running a single camera worker (debug)
 
+```powershell
 $env:PYTHONPATH = "$PWD\src"
 python -m holabot_station.camera_worker --config configs/config.yaml --camera cam1
-
+```
 Press **q** in the OpenCV window to stop the worker.
 
 ## Event output
@@ -83,7 +93,7 @@ Events are written based on `storage.type`:
 - `none`: discard events
 
 Example event:
-
+```json
 {
   "ts": 1720000000.123,
   "camera": "cam1",
@@ -92,6 +102,7 @@ Example event:
   "type": "enter",
   "meta": {"source_type": "file"}
 }
+```
 
 ## Notes on models (open-source safety)
 
