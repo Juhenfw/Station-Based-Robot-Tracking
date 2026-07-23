@@ -4,6 +4,10 @@
 
 # Station-Based Robot Tracking (Open Source Template)
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![Open Source](https://img.shields.io/badge/Open%20Source-%E2%99%A5-red)](https://opensource.org/)
+
 This repository is an **open-source-friendly template** for running **multi-camera robot detection + checkpoint (station) tracking**.
 
 It is designed to match a production-style setup where:

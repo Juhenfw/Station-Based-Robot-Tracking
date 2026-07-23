@@ -4,6 +4,10 @@
 
 # ステーションベースのロボットトラッキング (オープンソース テンプレート)
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![Open Source](https://img.shields.io/badge/Open%20Source-%E2%99%A5-red)](https://opensource.org/)
+
 このリポジトリは、**マルチカメラによるロボット検出とチェックポイント（ステーション）トラッキング**を実行するための**オープンソース向けテンプレート**です。
 
 本番環境に合わせた設計になっており、以下の構成で動作します：

@@ -4,6 +4,10 @@
 
 # 基于站点的机器人追踪 (开源模板)
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![Open Source](https://img.shields.io/badge/Open%20Source-%E2%99%A5-red)](https://opensource.org/)
+
 本仓库是一个**对开源友好的模板**，用于运行**多摄像头机器人检测 + 检查点（站点）追踪**。
 
 它的设计符合生产环境风格：
