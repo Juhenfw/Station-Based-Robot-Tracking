@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "station-based-robot-tracking"
+version = "1.0.0"
+description = "Station-Based Robot Tracking using YOLOv8 (Open Source Template)"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+  {name = "Juhen Fashikha Wildan"}
+]
+
+# Core runtime dependencies
+dependencies = [
+    "pyyaml>=6.0",
+    "opencv-python>=4.8",
+    "numpy>=1.23",
+    "ultralytics>=8.0"
+]
+
+# Opsi jika Anda benar-benar ingin membuat instalasi YOLO menjadi opsional (seperti komentar Anda)
+# Pengguna bisa menginstall dengan: pip install .[yolo]
+[project.optional-dependencies]
+yolo = ["ultralytics>=8.0"]
